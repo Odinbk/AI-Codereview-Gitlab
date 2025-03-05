@@ -1,3 +1,4 @@
+import os
 from biz.utils.im.dingtalk import DingTalkNotifier
 from biz.utils.im.feishu import FeishuNotifier
 from biz.utils.im.wecom import WeComNotifier
