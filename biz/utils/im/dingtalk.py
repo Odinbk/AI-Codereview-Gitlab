@@ -12,53 +12,44 @@ from biz.utils.log import logger
 
 
 class DingTalkNotifier:
-    def __init__(self, git_project_name=None):
+    def __init__(self, webhook_url=None):
         self.enabled = os.environ.get('DINGTALK_ENABLED', '0') == '1'
-        self.webhook_url = self._get_webhook_url()
-        self._git_project_name = git_project_name
-        self.secret = self._get_project_secret()
+        self.default_webhook_url = webhook_url or os.environ.get('DINGTALK_WEBHOOK_URL')
 
-    def _get_webhook_url(self):
-        token = os.environ.get('DINGTALK_WEBHOOK_TOKEN', None)
-        if self._git_project_name:
-            token = os.environ.get(f"{self._git_project_name.upper()}_DINGTALK_WEBHOOK_TOKEN")
+    def _get_webhook_url(self, project_name=None):
+        """
+        获取项目对应的 Webhook URL
+        :param project_name: 项目名称
+        :return: Webhook URL
+        :raises ValueError: 如果未找到 Webhook URL
+        """
+        # 如果未提供 project_name，直接返回默认的 Webhook URL
+        if not project_name:
+            if self.default_webhook_url:
+                return self.default_webhook_url
+            else:
+                raise ValueError("未提供项目名称，且未设置默认的钉钉 Webhook URL。")
 
-        if not token:
-            raise ValueError("Webhook token not found. Please ensure 'DINGTALK_WEBHOOK_TOKEN' or "
-                             f"{self._git_project_name.upper()}_DINGTALK_WEBHOOK_TOKEN is set in environment variables.")
+        # 遍历所有环境变量（忽略大小写），找到项目对应的 Webhook URL
+        target_key = f"DINGTALK_WEBHOOK_URL_{project_name.upper()}"
+        for env_key, env_value in os.environ.items():
+            if env_key.upper() == target_key:
+                return env_value  # 找到匹配项，直接返回
 
-        return f"https://oapi.dingtalk.com/robot/send?access_token={str(token)}"
+        # 如果未找到匹配的环境变量，降级使用全局的 Webhook URL
+        if self.default_webhook_url:
+            return self.default_webhook_url
 
-    def _get_project_secret(self):
-        env_key = f"{self._git_project_name.upper()}_DINGTALK_SECRET" if self._git_project_name else "DINGTALK_SECRET"
-        return os.environ.get(env_key, None)
+        # 如果既未找到匹配项，也没有默认值，抛出异常
+        raise ValueError(f"未找到项目 '{project_name}' 对应的钉钉Webhook URL，且未设置默认的 Webhook URL。")
 
-    def _generate_signature(self):
-        timestamp = str(round(time.time() * 1000))
-        secret_enc = self.secret.encode('utf-8')
-        string_to_sign = f'{timestamp}\n{self.secret}'
-        string_to_sign_enc = string_to_sign.encode('utf-8')
-        hmac_code = hmac.new(secret_enc, string_to_sign_enc, hashlib.sha256).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code).decode('utf-8'))
-        return timestamp, sign
-
-    def _get_post_url(self):
-        if not self.secret:
-            return self.webhook_url
-        timestamp, sign = self._generate_signature()
-        return f"{self.webhook_url}&timestamp={timestamp}&sign={sign}"
-
-    def send_message(self, content: str, msg_type='text', title='通知', is_at_all=False):
+    def send_message(self, content: str, msg_type='text', title='通知', is_at_all=False, project_name=None):
         if not self.enabled:
             logger.info("钉钉推送未启用")
             return
 
-        if not self.webhook_url:
-            logger.error("钉钉Webhook URL未配置")
-            return
         try:
-            logger.info(f"钉钉Webhook: {str(self.webhook_url)}")
-            post_url = self._get_post_url()
+            post_url = self._get_webhook_url(project_name=project_name)
             headers = {
                 "Content-Type": "application/json",
                 "Charset": "UTF-8"
@@ -87,8 +78,8 @@ class DingTalkNotifier:
             response = requests.post(url=post_url, data=json.dumps(message), headers=headers)
             response_data = response.json()
             if response_data.get('errmsg') == 'ok':
-                logger.info("钉钉消息发送成功!")
+                logger.info(f"钉钉消息发送成功! webhook_url:{post_url}")
             else:
-                logger.error(f"发送失败:{response_data.get('errmsg')}")
+                logger.error(f"钉钉消息发送失败! webhook_url:{post_url},errmsg:{response_data.get('errmsg')}")
         except Exception as e:
-            logger.error("发送钉钉消息失败:", e)
+            logger.error(f"钉钉消息发送失败! ", e)

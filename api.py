@@ -10,9 +10,10 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 
-from biz.entity.review_entity import MergeRequestReviewEntity, PushReviewEntity
+from biz.entity.review_entity import MergeRequestReviewEntity, PushReviewEntity, SystemHookReviewEntity
 from biz.event.event_manager import event_manager
-from biz.gitlab.webhook_handler import MergeRequestHandler, PushHandler
+from biz.gitlab.webhook_handler import MergeRequestHandler, PushHandler, SystemHookHandler
+from biz.service.review_service import ReviewService
 from biz.utils.code_reviewer import CodeReviewer
 from biz.utils.im import im_notifier
 from biz.utils.log import logger
@@ -21,76 +22,82 @@ from biz.utils.reporter import Reporter
 load_dotenv()
 api_app = Flask(__name__)
 
+PUSH_REVIEW_ENABLED = os.environ.get('PUSH_REVIEW_ENABLED', '0') == '1'
+
 
 @api_app.route('/')
 def home():
-    return """<h2>The code review server is running.</h2>
-              <p>开源地址：<a href="https://github.com/sunmh207/AI-Codereview-Gitlab" target="_blank">
-              https://github.com/sunmh207/AI-Codereview-Gitlab</a></p>"""
+    return """<h2>The code review api server is running.</h2>
+              <p>GitHub project address: <a href="https://github.com/sunmh207/AI-Codereview-Gitlab" target="_blank">
+              https://github.com/sunmh207/AI-Codereview-Gitlab</a></p>
+              <p>Gitee project address: <a href="https://gitee.com/sunminghui/ai-codereview-gitlab" target="_blank">https://gitee.com/sunminghui/ai-codereview-gitlab</a></p>
+              """
 
 
 @api_app.route('/review/daily_report', methods=['GET'])
 def daily_report():
-    data_dir = os.getenv('REPORT_DATA_DIR', './')
-    data_file = "push_" + datetime.now().strftime("%Y-%m-%d") + ".json"
-    data_file_path = os.path.join(data_dir, data_file)
-    data_entries = []
-    if os.path.exists(data_file_path):
-        with open(data_file_path, 'r', encoding='utf-8') as file:
-            for line in file:
-                # 解析每一行的 JSON 内容，并添加到 data_entries 数组中
-                try:
-                    data_entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    # 处理可能的 JSON 解码错误
-                    logger.error(f"Skipping invalid JSON entry: {line}")
-    else:
-        logger.error(f"Log file {data_file_path} does not exist.")
-        return jsonify({'message': f"Log file {data_file_path} does not exist."}), 404
+    # 获取当前日期0点和23点59分59秒的时间戳
+    start_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    end_time = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0).timestamp()
 
-    # 如果没有data,直接返回
-    if not data_entries:
-        return jsonify({'message': 'No data to process.'}), 200
+    try:
+        if PUSH_REVIEW_ENABLED:
+            df = ReviewService().get_push_review_logs(updated_at_gte=start_time, updated_at_lte=end_time)
+        else:
+            df = ReviewService().get_mr_review_logs(updated_at_gte=start_time, updated_at_lte=end_time)
 
-    # 使用字典去重 (author, message) 相同的提交记录
-    unique_commits = {}
-    for entry in data_entries:
-        author = entry.get("author", "Unknown Author")
-        message = entry.get("message", "").strip()
-        if (author, message) not in unique_commits:
-            unique_commits[(author, message)] = {"author": author, "message": message}
+        if df.empty:
+            logger.info("No data to process.")
+            return jsonify({'message': 'No data to process.'}), 200
+        # 去重：基于 (author, message) 组合
+        df_unique = df.drop_duplicates(subset=["author", "commit_messages"])
+        # 按照 author 排序
+        df_sorted = df_unique.sort_values(by="author")
+        # 转换为适合生成日报的格式
+        commits = df_sorted.to_dict(orient="records")
+        # 生成日报内容
+        report_txt = Reporter().generate_report(json.dumps(commits))
+        # 发送钉钉通知
+        im_notifier.send_notification(content=report_txt, msg_type="markdown", title="代码提交日报")
 
-    # 转换为列表形式，并按照 author 排序
-    commits = sorted(unique_commits.values(), key=lambda x: x["author"])
-    report_txt = Reporter().generate_report(json.dumps(commits))
-    # 发钉钉消息
-    im_notifier.send_notification(content=report_txt, msg_type="markdown", title="代码提交日报")
-    return json.dumps(report_txt, ensure_ascii=False, indent=4)
+        # 返回生成的日报内容
+        return json.dumps(report_txt, ensure_ascii=False, indent=4)
+    except Exception as e:
+        logger.error(f"Failed to generate daily report: {e}")
+        return jsonify({'message': f"Failed to generate daily report: {e}"}), 500
 
 
-# 启动定时生成日报的任务
-scheduler = BackgroundScheduler()
-crontab_expression = os.getenv('REPORT_CRONTAB_EXPRESSION', '0 22 * * 1-5')
-cron_parts = crontab_expression.split()
-cron_minute, cron_hour, cron_day, cron_month, cron_day_of_week = cron_parts
+def setup_scheduler():
+    """
+    配置并启动定时任务调度器
+    """
+    try:
+        scheduler = BackgroundScheduler()
+        crontab_expression = os.getenv('REPORT_CRONTAB_EXPRESSION', '0 18 * * 1-5')
+        cron_parts = crontab_expression.split()
+        cron_minute, cron_hour, cron_day, cron_month, cron_day_of_week = cron_parts
 
-# Schedule the task based on the crontab expression
-scheduler.add_job(
-    daily_report,
-    trigger=CronTrigger(
-        minute=cron_minute,
-        hour=cron_hour,
-        day=cron_day,
-        month=cron_month,
-        day_of_week=cron_day_of_week
-    )
-)
+        # Schedule the task based on the crontab expression
+        scheduler.add_job(
+            daily_report,
+            trigger=CronTrigger(
+                minute=cron_minute,
+                hour=cron_hour,
+                day=cron_day,
+                month=cron_month,
+                day_of_week=cron_day_of_week
+            )
+        )
 
-# Start the scheduler
-scheduler.start()
+        # Start the scheduler
+        scheduler.start()
+        logger.info("Scheduler started successfully.")
 
-# Shut down the scheduler when exiting the app
-atexit.register(lambda: scheduler.shutdown())
+        # Shut down the scheduler when exiting the app
+        atexit.register(lambda: scheduler.shutdown())
+    except Exception as e:
+        logger.error(f"Error setting up scheduler: {e}")
+        logger.error(traceback.format_exc())
 
 
 # 处理 GitLab Merge Request Webhook
@@ -125,6 +132,12 @@ def handle_webhook():
             process.start()
             # 立马返回响应
             return jsonify({'message': 'Request received, will process asynchronously.'}), 200
+        elif event_type == 'System Hook':
+            # 创建一个新进程进行异步处理
+            process = Process(target=__handle_system_hook, args=(data, gitlab_token, gitlab_url))
+            process.start()
+            # 立马返回响应
+            return jsonify({'message': 'Request received, will process asynchronously.'}), 200
         else:
             return jsonify({'message': 'Event type not supported'}), 400
     else:
@@ -140,21 +153,23 @@ def __handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str):
             logger.error('Failed to get commits')
             return
 
-            # review 代码
-        PUSH_REVIEW_ENABLED = os.environ.get('PUSH_REVIEW_ENABLED', '0') == '1'
         review_result = None
+        score = 0
         if PUSH_REVIEW_ENABLED:
             # 获取PUSH的changes
             changes = handler.get_push_changes()
             logger.info('changes: %s', changes)
+            changes = filter_changes(changes)
             if not changes:
                 logger.info('未检测到PUSH代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
+            review_result = "关注的文件没有修改"
 
-            commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
-
-            review_result = review_code(str(filter_changes(changes)), commits_text)
+            if len(changes) > 0:
+                commits_text = ';'.join(commit.get('message', '').strip() for commit in commits)
+                review_result = review_code(str(changes), commits_text)
+                score = CodeReviewer.parse_review_score(review_text=review_result)
             # 将review结果提交到Gitlab的 notes
-            handler.add_push_notes(f'Auto Review Result: {review_result}')
+            handler.add_push_notes(f'Auto Review Result: \n{review_result}')
 
         event_manager['push_reviewed'].send(PushReviewEntity(
             project_name=webhook_data['project']['name'],
@@ -162,7 +177,7 @@ def __handle_push_event(webhook_data: dict, gitlab_token: str, gitlab_url: str):
             branch=webhook_data['project']['default_branch'],
             updated_at=int(datetime.now().timestamp()),  # 当前时间
             commits=commits,
-            score=CodeReviewer.parse_review_score(review_text=review_result),
+            score=score,
             review_result=review_result,
         ))
 
@@ -205,7 +220,7 @@ def __handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_u
             review_result = review_code(str(changes), commits_text)
 
             # 将review结果提交到Gitlab的 notes
-            handler.add_merge_request_notes(f'Auto Review Result: {review_result}')
+            handler.add_merge_request_notes(f'Auto Review Result: \n{review_result}')
 
             # dispatch merge_request_reviewed event
             event_manager['merge_request_reviewed'].send(
@@ -230,6 +245,43 @@ def __handle_merge_request_event(webhook_data: dict, gitlab_token: str, gitlab_u
         im_notifier.send_notification(content=error_message)
         logger.error('出现未知错误: %s', error_message)
 
+def __handle_system_hook(webhook_data: dict, gitlab_token: str, gitlab_url: str):
+    '''
+    处理System Hook事件
+    :param webhook_data:
+    :param gitlab_token:
+    :param gitlab_url:
+    :return:
+    '''
+    try:
+        logger.info('System Hook event received')
+        handler = SystemHookHandler(webhook_data, gitlab_token, gitlab_url)
+        changes = handler.get_repository_changes()
+        logger.info('changes: %s', changes)
+        changes = filter_changes(changes)
+        if not changes:
+            logger.info('未检测到有关代码的修改,修改文件可能不满足SUPPORTED_EXTENSIONS。')
+            return
+        commits = handler.get_repository_commits()
+        # review 代码
+        commits_text = ';'.join(commit['title'] for commit in commits)
+        review_result = review_code(str(changes), commits_text)
+        logger.info(f'Payload: {json.dumps(webhook_data)}')
+        # dispatch system_hook_reviewed event
+        event_manager['system_hook_reviewed'].send(
+            SystemHookReviewEntity(
+                project_name=webhook_data['project']['name'],
+                author=webhook_data['user_name'],
+                updated_at=int(datetime.now().timestamp()),
+                commits=commits,
+                score=CodeReviewer.parse_review_score(review_text=review_result),
+                review_result=review_result
+            )
+        )
+    except Exception as e:
+        error_message = f'AI Code Review 服务出现未知错误: {str(e)}\n{traceback.format_exc()}'
+        im_notifier.send_notification(content=error_message)
+        logger.error('出现未知错误: %s', error_message)
 
 def filter_changes(changes: list):
     '''
@@ -240,7 +292,10 @@ def filter_changes(changes: list):
     SUPPORTED_EXTENSIONS = os.getenv('SUPPORTED_EXTENSIONS', '.java,.py,.php').split(',')
     # 过滤 `new_path` 以支持的扩展名结尾的元素, 仅保留diff和new_path字段
     filtered_changes = [
-        {'diff': item['diff'], 'new_path': item['new_path']}
+        {
+            'diff': item.get('diff', ''),
+            'new_path': item['new_path']
+        }
         for item in filter_deleted_files_changes
         if any(item.get('new_path', '').endswith(ext) for ext in SUPPORTED_EXTENSIONS)
     ]
@@ -258,10 +313,16 @@ def review_code(changes_text: str, commits_text: str = '') -> str:
     if len(changes_text) > review_max_length:
         changes_text = changes_text[:review_max_length]
         logger.info(f'文本超长，截段后content: {changes_text}')
-
-    return CodeReviewer().review_code(changes_text, commits_text)
+    review_result = CodeReviewer().review_code(changes_text, commits_text).strip()
+    if review_result.startswith("```markdown") and review_result.endswith("```"):
+        return review_result[11:-3].strip()
+    return review_result
 
 
 if __name__ == '__main__':
+    # 启动定时任务调度器
+    setup_scheduler()
+
+    # 启动Flask API服务
     port = int(os.environ.get('SERVER_PORT', 5001))
     api_app.run(host='0.0.0.0', port=port)

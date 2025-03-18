@@ -35,24 +35,13 @@ def on_merge_request_reviewed(mr_review_entity: MergeRequestReviewEntity):
 
 {mr_review_entity.review_result}
     """
-    im_notifier.send_notification(content=im_msg, msg_type='markdown', title='Merge Request Review',
-                                  project_name=mr_review_entity.project_name)
+    im_notifier.send_notification(content=im_msg, msg_type='markdown', title='Merge Request Review',project_name=mr_review_entity.project_name)
 
     # 记录到数据库
     ReviewService().insert_mr_review_log(mr_review_entity)
 
 
 def on_push_reviewed(entity: PushReviewEntity):
-    # 记录到日志文件, 日报数据 TODO: 待优化
-    commits_filtered = [{'message': commit['message'], 'author': commit['author'], 'timestamp': commit['timestamp']}
-                        for commit in entity.commits]
-    data_dir = os.getenv('REPORT_DATA_DIR', './')
-    push_data_file = "push_" + datetime.now().strftime("%Y-%m-%d") + ".json"
-    push_file_path = os.path.join(data_dir, push_data_file)
-    with open(push_file_path, 'a', encoding='utf-8') as f:
-        for commit in commits_filtered:
-            f.write(json.dumps(commit, ensure_ascii=False) + "\n")
-
     # 发送IM消息通知
     im_msg = f"### 🚀 {entity.project_name}: Push\n\n"
     im_msg += "#### 提交记录:\n"
@@ -72,8 +61,7 @@ def on_push_reviewed(entity: PushReviewEntity):
     if entity.review_result:
         im_msg += f"#### AI Review 结果: \n {entity.review_result}\n\n"
     im_notifier.send_notification(content=im_msg, msg_type='markdown',
-                                  title=f"{entity.project_name} Push Event",
-                                  project_name=entity.project_name)
+                                  title=f"{entity.project_name} Push Event", project_name=entity.project_name)
 
     # 记录到数据库
     ReviewService().insert_push_review_log(entity)

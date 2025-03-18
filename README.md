@@ -20,11 +20,12 @@
 ![Note图片](./doc/img/note.jpeg)
 
 ![Dashboard图片](./doc/img/dashboard.png)
+
 ## 原理
 
-当用户在 GitLab 上提交代码（包括 Merge Request 或 Push 操作）时，GitLab 会触发 webhook 事件，并
-调用本系统的接口；本系统调用第三方大模型对代码进行审查，并将审查结果记录在对应的 Merge Request 或 Commit 的 Note
-中。
+当用户在 GitLab 上提交代码（如 Merge Request 或 Push 操作）时，GitLab 将自动触发 webhook 事件，调用本系统的接口。系统随后通过第三方大模型对代码进行审查，并将审查结果直接反馈到对应的 Merge Request 或 Commit 的 Note 中，便于团队查看和处理。
+
+![流程图](./doc/img/process.png)
 
 ## 部署
 
@@ -60,11 +61,12 @@ GITLAB_ACCESS_TOKEN={YOUR_GITLAB_ACCESS_TOKEN}
 **2. 启动docker容器**
 
 ```bash
-docker run -d --name codereview-gitlab \
+docker run --rm --name ai-codereview-gitlab \
   -p 5001:5001 \
   -p 5002:5002 \
   -v $(pwd)/.env:/app/.env \
-  registry.cn-hangzhou.aliyuncs.com/stanley-public/ai-codereview-gitlab:1.1.1
+  -e TZ=Asia/Shanghai \
+  sunmh207/ai-codereview-gitlab:1.2.2
 ```
 
 **3. 验证服务**
@@ -76,7 +78,6 @@ docker run -d --name codereview-gitlab \
 ### 方案二：本地Python环境部署
 
 **1. 获取源码**
-
 
 ```bash
 git clone https://github.com/sunmh207/AI-Codereview-Gitlab.git
@@ -96,24 +97,28 @@ pip install -r requirements.txt
 同 Docker 部署方案中的 【创建.env文件】
 
 **4. 启动服务**
+
 - 启动API服务：
+
 ```bash
 python api.py
 ```
+
 - 启动Dashboard服务：
+
 ```bash
-python ui.py
+streamlit run ui.py --server.port=5002 --server.address=0.0.0.0
 ```
 
 ### 配置 GitLab Webhook
 
-#### **a) 创建Access Token**
+#### 1. 创建Access Token**
 
 方法一：在 GitLab 个人设置中，创建一个 Personal Access Token。
 
 方法二：在 GitLab 项目设置中，创建Project Access Token
 
-#### **b) 配置 Webhook**
+#### 2. 配置 Webhook**
 
 在 GitLab 项目设置中，配置 Webhook：
 
@@ -121,9 +126,11 @@ python ui.py
 - Trigger Events：勾选 Push Events 和 Merge Request Events (不要勾选其它Event)
 - Secret Token：上面配置的 Access Token(可选)
 
-备注：系统会优先使用.env中的GITLAB_ACCESS_TOKEN，如果找到，则使用Webhook 传递的Secret Token
+备注：系统会优先使用.env中的GITLAB_ACCESS_TOKEN，如果未找到，则使用Webhook 传递的Secret Token
 
-### 配置钉钉推送
+### 配置消息推送
+
+#### 1.配置钉钉推送
 
 - 在钉钉群中添加一个自定义机器人，获取 Webhook URL。
 - 更新 .env 中的配置：
@@ -132,9 +139,8 @@ python ui.py
   DINGTALK_ENABLED=1  #0不发送钉钉消息，1发送钉钉消息
   DINGTALK_WEBHOOK_URL=https://oapi.dingtalk.com/robot/send?access_token=xxx #替换为你的Webhook URL
   ```
-- 如果使用企业机器人，需要配置DINGTALK_SECRET，具体可参考：https://open.dingtalk.com/document/orgapp/obtain-orgapp-token
 
-### 配置企业微信推送
+#### 2.配置企业微信推送
 
 - 在企业微信群中添加一个自定义机器人，获取 Webhook URL。
 
@@ -145,7 +151,7 @@ python ui.py
   WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx  #替换为你的Webhook URL
   ```
 
-### 配置飞书推送
+#### 3.配置飞书推送
 
 - 在飞书群中添加一个自定义机器人，获取 Webhook URL。
 - 更新 .env 中的配置：
@@ -155,8 +161,18 @@ python ui.py
   FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxx #替换为你的Webhook URL
   ```
 
+## 常见问题
+
+参见 [常见问题](doc/faq.md)
+
 ## 交流
 
-如果您有任何问题或建议，欢迎提交 Issue 或 PR，我会尽快处理。此外，您也可以添加微信与我交流：
+若本项目对您有帮助，欢迎 Star ⭐️ 或 Fork。 有任何问题或建议，欢迎提交 Issue 或 PR。
 
-![wechat](./doc/img/wechat.jpeg)
+也欢迎加微信/微信群，一起交流学习。
+
+<p float="left">
+  <img src="doc/img/wechat.jpg" width="400" />
+  <img src="doc/img/wechat_group.jpg" width="400" /> 
+</p>
+

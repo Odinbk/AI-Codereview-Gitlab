@@ -1,6 +1,6 @@
 services:
   flask-app:
-    image: registry.cn-hangzhou.aliyuncs.com/stanley-public/ai-codereview-gitlab:1.1.1
+    image: sunmh207/ai-codereview-gitlab:1.2.2
     ports:
       - "5001:5001"
       - "5002:5002"
@@ -8,4 +8,6 @@ services:
       - ./.env:/app/.env
       - ./log:/app/log
       - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
     restart: unless-stopped
